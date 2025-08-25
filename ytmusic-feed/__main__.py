@@ -1,43 +1,35 @@
 import json
 import os
+import datetime
+
 import ytmusicapi
-from enum import Enum
-from datetime import date
 
 from . import musicbrainz
+from .config import Config, ArtistMode
 
 # TODO cache the results of most API calls
-
-ArtistMode = Enum('ArtistMode', ('ALL', 'LIBRARY_ONLY', 'SUBSCRIPTIONS_ONLY'))
-
-class YTMusicFeedConfig:
-    auth_filepath: str
-    oauth_filepath: str
-    artist_mode: ArtistMode
-    max_feed_len: int
-
-    def __init__(
-            self,
-            auth_filepath="auth.json",
-            oauth_filepath="oauth.json",
-            arist_mode=ArtistMode.ALL,
-            max_feed_len=100
-        ):
-        self.auth_filepath = auth_filepath
-        self.oauth_filepath = oauth_filepath
-        self.artist_mode = arist_mode
-        self.max_feed_len = max_feed_len
 
 class YTMusicFeed:
     credentials: ytmusicapi.OAuthCredentials | None
     client: ytmusicapi.YTMusic | None
-    config: YTMusicFeedConfig
+    config: Config
     artists: dict
 
-    def __init__(self, config=YTMusicFeedConfig()):
+    def __init__(self, config=Config()):
         self.config = config
         self.load_credentials_from_file()
         self.authenticate()
+
+    def __str__(self):
+        def default_serializer(obj):
+            if isinstance(obj, (datetime.date, datetime.datetime)):
+                return str(obj)
+            raise TypeError("Type not serializable")
+        
+        return json.dumps(
+            self.artists,
+            default=default_serializer
+        )
 
     def load_credentials_from_file(self):
         filepath = self.config.auth_filepath
@@ -67,52 +59,42 @@ class YTMusicFeed:
             file.write(refreshing_token.as_json())
         self.ytmusic = new_ytmusic()
 
-    def collect_artists(self):
+    def collect_releases(self):
         self.artists = {}
         data = []
 
-        if self.config.artist_mode in (ArtistMode.ALL, ArtistMode.LIBRARY_ONLY):
+        if self.config.artist_mode in (ArtistMode.ALL, ArtistMode.LIBRARY):
             data.extend(self.ytmusic.get_library_artists(limit=10000))
-        if self.config.artist_mode in (ArtistMode.ALL, ArtistMode.SUBSCRIPTIONS_ONLY):
+        if self.config.artist_mode in (ArtistMode.ALL, ArtistMode.SUBSCRIPTIONS):
             data.extend(self.ytmusic.get_library_subscriptions(limit=10000))
 
         for x in data:
-            browse_id = x['browseId'].removeprefix("MPLA")
-            self.artists[x['artist']] = { 
+            browse_id = x['browseId'].removeprefix("MPLA").removeprefix("UC")
+            artist_name = x['artist']
+
+            def get_compare_releases():
+                yt_artist = self.ytmusic.get_artist(x['browseId'])
+                yt_releases = []
+                for yt_release_type in ['songs', 'albums']:
+                    yt_releases.extend([
+                        release.get('title') for release in yt_artist.get(yt_release_type,{}).get('results', [])
+                    ])
+                return yt_releases
+            mbid = musicbrainz.youtube_artist_to_mbid(artist_name, browse_id, get_compare_releases)
+
+            if not mbid:
+                continue
+
+            releases = musicbrainz.get_releases(mbid, self.config.release_type_blacklist)
+
+            # TODO: de-dupe singles
+
+            self.artists[artist_name] = { 
                 'browseId': browse_id,
-                'mbid': musicbrainz.youtube_artist_to_mbid(x['artist'], browse_id),
+                'mbid': mbid,
+                'releases': releases,
             }
 
-    def collect_releases(self):
-        for artist_name in self.artists:
-            artist = self.artists[artist_name]
-            artist_data = self.ytmusic.get_artist(artist['browseId'])
-
-            def collect(category):
-                browse_id = artist_data[category].get('browseId')
-                params = artist_data[category].get('params')
-                if not browse_id or not params:
-                    data = artist_data[category]['results']
-                else:
-                    data = self.ytmusic.get_artist_albums(
-                        browse_id,
-                        params=params,
-                        limit=self.config.max_feed_len,
-                        order="Recency"
-                    )
-
-                for x in data:
-                    pass
-                    # TODO: if year older than top 100, skip
-
-                return data
-
-            # TODO: dedupe singles that are in albums
-            artist['albums'] = collect('albums')
-            artist['singles'] = collect('singles')
-
 feed = YTMusicFeed()
-feed.collect_artists()
-# feed.collect_releases()
-
-print(json.dumps(feed.artists))
+feed.collect_releases()
+print(str(feed))
