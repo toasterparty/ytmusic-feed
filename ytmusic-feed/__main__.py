@@ -1,35 +1,69 @@
 import json
 import os
 import datetime
+import copy
 
 import ytmusicapi
 
 from . import musicbrainz
-from .config import Config, ArtistMode
+from .config import Config, ArtistMode, DEFAULT_CONFIG, normalize_release_type
 
-# TODO cache the results of most API calls
-
-class YTMusicFeed:
+class Feed:
     credentials: ytmusicapi.OAuthCredentials | None
     client: ytmusicapi.YTMusic | None
     config: Config
     artists: dict
 
-    def __init__(self, config=Config()):
+    def __init__(self, config=DEFAULT_CONFIG):
         self.config = config
         self.load_credentials_from_file()
         self.authenticate()
 
     def __str__(self):
-        def default_serializer(obj):
-            if isinstance(obj, (datetime.date, datetime.datetime)):
-                return str(obj)
+        def default_serializer(x):
+            if isinstance(x, (datetime.date, datetime.datetime)):
+                return str(x)
             raise TypeError("Type not serializable")
-        
-        return json.dumps(
-            self.artists,
-            default=default_serializer
-        )
+
+        data = {
+            'artists' : self.artists,
+            'releases' : self.filtered_releases,
+        }
+        return json.dumps(data, default=default_serializer)
+
+    def __repr__(self):
+        return str(self)
+
+    @property
+    def filtered_releases(self):
+        def is_not_blacklisted(x):
+            blacklist = self.config.release_type_blacklist_normalized
+            if normalize_release_type(x['type']) in blacklist:
+                return False
+
+            for type in x['secondary_types']:
+                if normalize_release_type(type) in blacklist:
+                    return False
+
+            return True
+
+        releases = copy.deepcopy(self.releases)
+        releases = filter(is_not_blacklisted, releases)
+        return list(releases)
+
+    def print(self):
+        date_width = 10
+        type_width = max(len(r['type']) for r in self.filtered_releases)
+        sec_width = max(len(' '.join(r['secondary_types'])) for r in self.filtered_releases)
+        artist_width = max(len(r['artist']) for r in self.filtered_releases)
+        for release in self.filtered_releases:
+            print(
+                f"{release['release_date']:<{date_width}} "
+                f"{' '.join(release['secondary_types']):<{sec_width}} "
+                f"{release['type']:<{type_width}} "
+                f"{release['artist']:<{artist_width}} "
+                f"- {release['title']}"
+            )
 
     def load_credentials_from_file(self):
         filepath = self.config.auth_filepath
@@ -61,6 +95,7 @@ class YTMusicFeed:
 
     def collect_releases(self):
         self.artists = {}
+        self.releases = []
         data = []
 
         if self.config.artist_mode in (ArtistMode.ALL, ArtistMode.LIBRARY):
@@ -85,16 +120,24 @@ class YTMusicFeed:
             if not mbid:
                 continue
 
-            releases = musicbrainz.get_releases(mbid, self.config.release_type_blacklist)
-
-            # TODO: de-dupe singles
+            releases = musicbrainz.get_releases(mbid)
+            for release in releases:
+                release['artist'] = artist_name
 
             self.artists[artist_name] = { 
                 'browseId': browse_id,
                 'mbid': mbid,
-                'releases': releases,
             }
+            self.releases.extend(releases)
 
-feed = YTMusicFeed()
+        def key(x):
+            return x['release_date']
+
+        self.releases.sort(key=key, reverse=True)
+
+feed = Feed()
 feed.collect_releases()
-print(str(feed))
+with open('out.json', 'w') as f:
+    text = str(feed)
+    f.write(text)
+feed.print()

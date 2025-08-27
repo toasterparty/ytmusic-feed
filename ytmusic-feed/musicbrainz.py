@@ -3,8 +3,6 @@ import re
 
 import musicbrainzngs
 
-from .config import normalize_release_type
-
 musicbrainzngs.set_useragent('ytmusic-feed', '0.1.0', 'toasterparty@derpymail.org')
 
 cache = {}
@@ -95,10 +93,10 @@ def parse_release_date(release_date: str):
             d = None
     except Exception:
         d = None
-    
+
     return d
 
-def get_releases(mbid, release_type_blacklist: list[str]):
+def get_releases(mbid):
     releases = []
     if not mbid:
         return releases
@@ -110,21 +108,6 @@ def get_releases(mbid, release_type_blacklist: list[str]):
         return releases
 
     for x in release_data:
-        release_type_primary = x['primary-type']
-        if normalize_release_type(release_type_primary) in release_type_blacklist:
-            continue
-
-        match = False
-        release_type_secondary = None
-        for secondary_type in x.get('secondary-type-list', []):
-            if not release_type_secondary:
-                release_type_secondary = secondary_type
-            if normalize_release_type(secondary_type) in release_type_blacklist:
-                match = True
-                break
-        if match:
-            continue
-
         try:
             release_date = parse_release_date(x['first-release-date'])
         except Exception:
@@ -136,15 +119,10 @@ def get_releases(mbid, release_type_blacklist: list[str]):
         releases.append(
             {
                 'title': x['title'],
-                'type': release_type_primary,
-                'secondary_type': release_type_secondary,
+                'type': x['primary-type'],
+                'secondary_types': x.get('secondary-type-list', []),
                 'release_date': release_date,
             }
         )
-    
-    def key(x):
-        return x['release_date']
-
-    releases.sort(key=key, reverse=True)
 
     return releases
